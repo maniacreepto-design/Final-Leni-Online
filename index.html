@@ -1209,10 +1209,10 @@
         <h2 class="section-title" style="text-align:center;" data-t="loginTitle">Welcome to LRP Desk Online</h2>
         <p class="section-sub" style="text-align:center;" data-t="loginSub">Sign in with your LRN to send and track your reports.</p>
 
-        <label class="field-label" data-t="fieldLrn">Pen name or nickname</label>
-        <p class="field-hint" data-t="lrnHint">This is what shows on your report if you don't stay anonymous. Keep it kind and appropriate.</p>
-        <input type="text" id="lrnInput" maxlength="24" autocomplete="off" placeholder="">
-        <p class="field-hint" id="lrnCounter" style="margin-top:-10px;">0 / 24</p>
+        <label class="field-label" data-t="fieldLrn">Learner Reference Number (LRN)</label>
+        <p class="field-hint" data-t="lrnHint">12 digits, found on your report card or school ID.</p>
+        <input type="text" id="lrnInput" inputmode="numeric" pattern="\d{12}" maxlength="12" autocomplete="off" placeholder="">
+        <p class="field-hint" id="lrnCounter" style="margin-top:-10px;">0 / 12</p>
         <button class="btn-primary btn-full" id="lrnContinue"><span data-t="loginContinue">Continue</span></button>
 
         <div class="admin-gate">
@@ -1808,12 +1808,12 @@
       toastSaved:"Report saved on this device",
       statusSubmitted:"Submitted — awaiting review",
       loginTitle:"Welcome to LRP Desk Online",
-      loginSub:"Pick a pen name or nickname to send and track your reports.",
-      fieldLrn:"Pen name or nickname",
-      lrnHint:"This is what shows on your report if you don't stay anonymous. Keep it kind and appropriate.",
+      loginSub:"Sign in with your LRN to send and track your reports.",
+      fieldLrn:"Learner Reference Number (LRN)",
+      lrnHint:"12 digits, found on your report card or school ID.",
       loginContinue:"Continue",
-      lrnInvalid:"Please enter a pen name or nickname (at least 2 characters).",
-      lrnProfane:"That nickname isn't allowed here. Please choose a different, appropriate one.",
+      lrnInvalid:"Please enter a valid 12-digit LRN.",
+      lrnProfane:"That name isn't allowed here. Please use appropriate language.",
       adminLink:"Guidance Office / Admin access",
       adminPassLabel:"Admin passcode",
       adminPassSubmit:"Unlock admin access",
@@ -1842,16 +1842,16 @@
       adminEmptyBody:"No reports on this device yet.",
       identifiedAs:"Identified",
       anonymousLabel:"Anonymous",
-      lrnLabel:"Nickname: ",
+      lrnLabel:"LRN: ",
       nameLabel:"Name: ",
       gradeLabelShort:"Grade/section: ",
       accDeviceTitle:"Device & Account",
-      signedInAs:"Signed in as ",
+      signedInAs:"Signed in — LRN ",
       adminDeviceLabel:"This device: Guidance Admin",
       switchAccount:"Switch account",
       deviceCurrentRoleStudent:"This device is signed in as a Learner.",
       deviceCurrentRoleAdmin:"This device is set up as the Guidance Admin device.",
-      deviceLrnShown:"Nickname on this device: ",
+      deviceLrnShown:"LRN on this device: ",
       logoutBtn:"Log out of this device",
       loggedOutToast:"Logged out. You can sign in again.",
       securityNote:"Note: the admin passcode is a simple device lock for this prototype, not full security — anyone who knows it can unlock admin view.",
@@ -2002,12 +2002,12 @@
       toastSaved:"Na-save ang report sa device na ito",
       statusSubmitted:"Naipasa — hinihintay ang pagsusuri",
       loginTitle:"Maligayang pagdating sa LRP Desk Online",
-      loginSub:"Pumili ng pen name o palayaw para magpadala at subaybayan ang mga report mo.",
-      fieldLrn:"Pen name o palayaw",
-      lrnHint:"Ito ang lalabas sa report mo kung hindi ka mananatiling anonymous. Panatilihing magalang at angkop.",
+      loginSub:"Mag-sign in gamit ang iyong LRN para magpadala at subaybayan ang mga report mo.",
+      fieldLrn:"Learner Reference Number (LRN)",
+      lrnHint:"12 digit, makikita sa report card o school ID mo.",
       loginContinue:"Magpatuloy",
-      lrnInvalid:"Maglagay ng pen name o palayaw (hindi bababa sa 2 letra).",
-      lrnProfane:"Hindi puwede ang palayaw na iyan dito. Pumili ng ibang angkop na palayaw.",
+      lrnInvalid:"Maglagay ng wastong 12-digit na LRN.",
+      lrnProfane:"Hindi puwede ang pangalang iyan dito. Gumamit ng magalang na salita.",
       adminLink:"Guidance Office / Admin access",
       adminPassLabel:"Admin passcode",
       adminPassSubmit:"I-unlock ang admin access",
@@ -2036,16 +2036,16 @@
       adminEmptyBody:"Wala pang report sa device na ito.",
       identifiedAs:"May pagkakakilanlan",
       anonymousLabel:"Anonymous",
-      lrnLabel:"Palayaw: ",
+      lrnLabel:"LRN: ",
       nameLabel:"Pangalan: ",
       gradeLabelShort:"Grade/section: ",
       accDeviceTitle:"Device at Account",
-      signedInAs:"Naka-sign in bilang ",
+      signedInAs:"Naka-sign in — LRN ",
       adminDeviceLabel:"Device na ito: Guidance Admin",
       switchAccount:"Palitan ang account",
       deviceCurrentRoleStudent:"Ang device na ito ay naka-sign in bilang Learner.",
       deviceCurrentRoleAdmin:"Ang device na ito ay naka-set up bilang Guidance Admin device.",
-      deviceLrnShown:"Palayaw sa device na ito: ",
+      deviceLrnShown:"LRN sa device na ito: ",
       logoutBtn:"Mag-log out sa device na ito",
       loggedOutToast:"Na-log out ka na. Puwede kang mag-sign in ulit.",
       securityNote:"Paalala: simpleng device lock lang ang admin passcode para sa prototype na ito, hindi ito ganap na seguridad — sinumang nakakaalam nito ay puwedeng mag-unlock ng admin view.",
@@ -2124,10 +2124,13 @@
     localStorage.removeItem("leni_lrn");
   }
   function maskLrn(lrn){
-    return lrn || "";
+    if(!lrn || lrn.length < 4) return lrn || "";
+    return "••••" + lrn.slice(-4);
   }
 
-  // Basic English + Filipino profanity/obscenity blocklist for nickname moderation.
+  // Basic English + Filipino profanity/obscenity blocklist, used to screen the
+  // optional "Your name" field on a report (free text, so it can still carry
+  // inappropriate language even though login itself is now numeric LRN only).
   // Note: this is a simple client-side word list and can be bypassed by creative
   // spelling; it's a first line of defense, not a complete moderation system.
   var BANNED_WORDS = [
@@ -3022,8 +3025,7 @@
   /* ================= LOGIN / ADMIN GATE ================= */
   document.getElementById("lrnContinue").addEventListener("click", function(){
     var val = document.getElementById("lrnInput").value.trim();
-    if(val.length < 2){ showToast(t("lrnInvalid")); return; }
-    if(containsProfanity(val)){ showToast(t("lrnProfane")); return; }
+    if(!/^\d{12}$/.test(val)){ showToast(t("lrnInvalid")); return; }
     setSession("student", val);
     document.body.className = "role-student";
     renderSessionBar();
@@ -3035,10 +3037,10 @@
     if(e.key === "Enter"){ document.getElementById("lrnContinue").click(); }
   });
   document.getElementById("lrnInput").addEventListener("input", function(){
-    var val = this.value.slice(0, 24);
-    this.value = val;
+    var digitsOnly = this.value.replace(/\D/g, "").slice(0, 12);
+    this.value = digitsOnly;
     var counter = document.getElementById("lrnCounter");
-    if(counter){ counter.textContent = val.length + " / 24"; }
+    if(counter){ counter.textContent = digitsOnly.length + " / 12"; }
   });
 
   document.getElementById("adminLinkBtn").addEventListener("click", function(){
