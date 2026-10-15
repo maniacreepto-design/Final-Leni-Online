@@ -1987,6 +1987,7 @@
       syncOffline:"Offline (local only)",
       syncError:"Sync error",
       syncNowBtn:"Sync now",
+      newReportToast:"New complaint/suggestion received",
       syncOfflineNotice:"This app is running in local-only mode: reports are saved on this device only, not consolidated across devices. Ask your app administrator to connect a shared server to enable that.",
       filterAll:"All", filterLrp:"LRP", filterGeneral:"General", filterSuggestion:"Suggestions",
       adminEmptyBody:"No reports on this device yet.",
@@ -2193,6 +2194,7 @@
       syncOffline:"Offline (lokal lang)",
       syncError:"May error sa sync",
       syncNowBtn:"I-sync ngayon",
+      newReportToast:"May bagong reklamo/suhestiyon",
       syncOfflineNotice:"Tumatakbo ang app na ito sa local-only mode: ang mga report ay naka-save lang sa device na ito, hindi pinagsama-sama sa lahat ng device. Hilingin sa iyong administrator na ikonekta ang isang shared server para dito.",
       filterAll:"Lahat", filterLrp:"LRP", filterGeneral:"General", filterSuggestion:"Suhestiyon",
       adminEmptyBody:"Wala pang report sa device na ito.",
@@ -2373,6 +2375,7 @@
   }
 
   function doLogout(){
+    try{ localStorage.removeItem("leni_admin_key"); }catch(e){}
     clearSession();
     document.body.className = "role-none";
     showToast(t("loggedOutToast"));
@@ -2661,8 +2664,10 @@
   function genRef(){
     var d = new Date();
     var ymd = d.getFullYear().toString() + String(d.getMonth()+1).padStart(2,"0") + String(d.getDate()).padStart(2,"0");
-    var rand = Math.floor(1000 + Math.random()*9000);
-    return "LENI-" + ymd + "-" + rand;
+    var alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789", s = "", buf = new Uint32Array(6);
+    (window.crypto || window.msCrypto).getRandomValues(buf);
+    for(var i = 0; i < 6; i++){ s += alphabet.charAt(buf[i] % alphabet.length); }
+    return "LENI-" + ymd + "-" + s;       // ~1 billion combinations: safe for hundreds at once
   }
 
   document.getElementById("submitReport").addEventListener("click", function(){
@@ -2727,44 +2732,150 @@
     if(idx === -1) return;
     patchFn(all[idx]);
     setStoredReports(all);
-    pushUpsert(all[idx]);
+    if(getSession().role === "admin"){ pushUpsert(all[idx]); }
   }
 
-  /* ================= SHARED SERVER SYNC (optional) ================= */
-  var syncTimer = null;
+  /* ================= SHARED SERVER SYNC (queue + retry + merge) ================= */
+  var syncTimer = null, flushing = false, adminSeenFirstSync = false;
+  var QKEY = "leni_pending";
 
   function isServerConfigured(){
     return !!(SERVER_URL && SERVER_URL.indexOf("http") === 0);
   }
+  function newOpId(){ return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+  function qGet(){ try{ return JSON.parse(localStorage.getItem(QKEY) || "[]"); }catch(e){ return []; } }
+  function qSet(q){ try{ localStorage.setItem(QKEY, JSON.stringify(q)); }catch(e){} }
+  function qRemove(id){ qSet(qGet().filter(function(o){ return o.id !== id; })); }
+  function qUpdate(id, fn){
+    var q = qGet();
+    for(var i = 0; i < q.length; i++){ if(q[i].id === id){ fn(q[i]); break; } }
+    qSet(q);
+  }
+  function adminKey(){ try{ return localStorage.getItem("leni_admin_key") || ""; }catch(e){ return ""; } }
 
-  function pushUpsert(record){
+  // Every change is first saved on the device, queued, then sent. If the network
+  // drops or the server is busy, it is retried automatically until confirmed.
+  function queueOp(op){
     if(!isServerConfigured()) return;
-    fetch(SERVER_URL, { method: "POST", body: JSON.stringify({ action: "upsert", report: record }) })
-      .catch(function(){ setSyncStatus("error"); });
+    op.id = newOpId(); op.tries = 0; op.sentAt = 0;
+    if(op.type === "upsert"){
+      op.report.opId = op.id;                       // lets us confirm it later
+      var all = getStoredReports();
+      var i = all.findIndex(function(r){ return r.ref === op.ref; });
+      if(i > -1){ all[i].opId = op.id; setStoredReports(all); }
+    }
+    var q = qGet();
+    if(op.type !== "deleteBulk"){ q = q.filter(function(o){ return o.ref !== op.ref; }); }
+    q.push(op);
+    qSet(q);
+    flushQueue();
   }
-  function pushDelete(ref){
-    if(!isServerConfigured()) return;
-    fetch(SERVER_URL, { method: "POST", body: JSON.stringify({ action: "delete", ref: ref }) })
-      .catch(function(){ setSyncStatus("error"); });
+  function pushUpsert(record){ queueOp({ type: "upsert", ref: record.ref, report: JSON.parse(JSON.stringify(record)) }); }
+  function pushDelete(ref){ queueOp({ type: "delete", ref: ref }); }
+  function pushDeleteBulk(cat){ queueOp({ type: "deleteBulk", cat: cat }); }
+
+  function opBody(op){
+    var b = { action: op.type, key: adminKey() };
+    if(op.type === "upsert"){ b.report = op.report; }
+    else if(op.type === "delete"){ b.ref = op.ref; }
+    else { b.cat = op.cat; }
+    return JSON.stringify(b);
   }
-  function pushDeleteBulk(cat){
-    if(!isServerConfigured()) return;
-    fetch(SERVER_URL, { method: "POST", body: JSON.stringify({ action: "deleteBulk", cat: cat }) })
-      .catch(function(){ setSyncStatus("error"); });
+  var DROP_ERRORS = { "invalid report":1, "invalid category":1, "invalid learner":1, "too large":1 };
+
+  function sendOp(op){
+    var body = opBody(op);
+    return fetch(SERVER_URL, { method: "POST", body: body })
+      .then(function(res){ return res.json(); })
+      .then(function(j){
+        if(j && j.success){ qRemove(op.id); setSyncStatus("online"); }
+        else if(j && j.error === "forbidden"){ qRemove(op.id); handleForbidden(); }
+        else if(j && DROP_ERRORS[j.error]){ qRemove(op.id); }
+        else { qUpdate(op.id, function(o){ o.tries++; }); setSyncStatus("error"); }   // busy -> retry later
+      })
+      .catch(function(){
+        // Response not readable (browser CORS rules): send once more in "fire-and-forget"
+        // mode and let the next sync confirm it. Safe to repeat: the server ignores duplicates.
+        return fetch(SERVER_URL, { method: "POST", mode: "no-cors", body: body })
+          .then(function(){ qUpdate(op.id, function(o){ o.sentAt = Date.now(); o.tries++; }); })
+          .catch(function(){ setSyncStatus("offline"); });
+      });
+  }
+  function flushQueue(){
+    if(flushing || !isServerConfigured()) return Promise.resolve();
+    qSet(qGet().filter(function(o){ return o.tries < 8; }));
+    var due = qGet().filter(function(o){ return !o.sentAt || Date.now() - o.sentAt > 45000; });
+    if(!due.length) return Promise.resolve();
+    flushing = true;
+    return due.reduce(function(p, op){ return p.then(function(){ return sendOp(op); }); }, Promise.resolve())
+      .then(function(){ flushing = false; }, function(){ flushing = false; });
+  }
+
+  // Server list + anything of ours that the server has not confirmed yet.
+  function mergePending(serverList){
+    var map = {};
+    serverList.forEach(function(r){ map[r.ref] = r; });
+    var keep = [];
+    qGet().forEach(function(op){
+      if(op.type === "upsert"){
+        var sv = map[op.ref];
+        if(sv && sv.opId === op.id){ return; }                                   // confirmed
+        if(sv && op.sentAt && op.tries >= 3 && Date.now() - op.sentAt > 60000){ return; }   // superseded
+        map[op.ref] = op.report; keep.push(op);
+      } else if(op.type === "delete"){
+        if(!map[op.ref]){ return; }                                              // already gone
+        delete map[op.ref]; keep.push(op);
+      } else {
+        var any = serverList.some(function(r){ return op.cat === "all" || r.cat === op.cat; });
+        if(!any && op.sentAt){ return; }
+        Object.keys(map).forEach(function(k){ if(op.cat === "all" || map[k].cat === op.cat){ delete map[k]; } });
+        keep.push(op);
+      }
+    });
+    qSet(keep);
+    return Object.keys(map).map(function(k){ return map[k]; })
+      .sort(function(a, b){ return new Date(b.date) - new Date(a.date); });
+  }
+
+  function handleForbidden(){
+    var s = getSession();
+    if(s.role !== "admin") return;
+    clearSession();
+    try{ localStorage.removeItem("leni_admin_key"); }catch(e){}
+    document.body.className = "role-none";
+    stopAdminPolling();
+    showView("login");
+    showToast(t("adminWrong"));
   }
 
   function syncFromServer(showLoading){
     if(!isServerConfigured()) return Promise.resolve(false);
+    var s = getSession();
+    if(!s.role || (s.role === "student" && !s.lrn)) return Promise.resolve(false);
     if(showLoading){ setSyncStatus("syncing"); }
-    return fetch(SERVER_URL + (SERVER_URL.indexOf("?") > -1 ? "&" : "?") + "action=list")
+    var qs = s.role === "admin" ? "&key=" + encodeURIComponent(adminKey()) : "&owner=" + encodeURIComponent(s.lrn);
+    return flushQueue().then(function(){
+      return fetch(SERVER_URL + (SERVER_URL.indexOf("?") > -1 ? "&" : "?") + "action=list" + qs);
+    })
       .then(function(res){ return res.json(); })
       .then(function(data){
+        if(data && data.error === "forbidden"){
+          if(s.role === "admin"){ handleForbidden(); }
+          setSyncStatus("error");
+          return false;
+        }
         if(data && Array.isArray(data.reports)){
-          setStoredReports(data.reports);
+          var before = {};
+          getStoredReports().forEach(function(r){ before[r.ref] = 1; });
+          var merged = mergePending(data.reports);
+          setStoredReports(merged);
           setSyncStatus("online");
-          var session = getSession();
-          if(session.role === "admin"){ renderAdmin(); }
-          else if(session.role === "student"){ renderReports(); }
+          if(s.role === "admin"){
+            var fresh = merged.filter(function(r){ return !before[r.ref]; }).length;
+            if(adminSeenFirstSync && fresh > 0){ showToast(t("newReportToast")); }
+            adminSeenFirstSync = true;
+            renderAdmin();
+          } else { renderReports(); }
           return true;
         }
         setSyncStatus("error");
@@ -2803,6 +2914,12 @@
   function stopAdminPolling(){
     if(syncTimer){ clearInterval(syncTimer); syncTimer = null; }
   }
+  // keep retrying unsent reports (bad signal, server busy, phone went offline)
+  window.addEventListener("online", function(){ flushQueue(); });
+  setInterval(function(){ if(qGet().length){ flushQueue(); } }, 20000);
+
+  function getSeen(){ try{ return JSON.parse(localStorage.getItem("leni_seen") || "{}"); }catch(e){ return {}; } }
+  function markSeen(ref, at){ var m = getSeen(); m[ref] = at; try{ localStorage.setItem("leni_seen", JSON.stringify(m)); }catch(e){} }
 
   function renderReports(){
     var list = document.getElementById("reportsList");
@@ -2828,7 +2945,7 @@
       var natureLabel = t(natureLabelKeys[r.nature] || "natOthers");
       var d = new Date(r.date);
       var dateStr = d.toLocaleDateString(lang === "fil" ? "fil-PH" : "en-PH", {month:"short", day:"numeric", year:"numeric"});
-      var hasNewReply = r.response && !r.responseSeenByStudent;
+      var hasNewReply = r.response && getSeen()[r.ref] !== r.response.at;
       var statusText = r.reviewed ? t("statusReviewed") : t("statusSubmitted");
       html += '<div class="report-item" data-ref="' + r.ref + '" data-role="track-card">' +
         '<div class="row1"><span class="ref">' + r.ref + (hasNewReply ? '<span class="new-reply-badge">' + t("newReplyBadge") + '</span>' : '') + '</span><span class="tag ' + r.cat + '">' + natureLabel + '</span></div>' +
@@ -2843,7 +2960,8 @@
     list.querySelectorAll('[data-role="track-card"]').forEach(function(card){
       card.addEventListener("click", function(){
         var ref = card.getAttribute("data-ref");
-        updateReportByRef(ref, function(r){ r.responseSeenByStudent = true; });
+        var rec = getStoredReports().find(function(x){ return x.ref === ref; });
+        if(rec && rec.response){ markSeen(ref, rec.response.at); }
         renderReports();
       });
     });
@@ -3233,17 +3351,26 @@
 
   document.getElementById("adminPassSubmit").addEventListener("click", function(){
     var code = document.getElementById("adminPassInput").value.trim();
-    if(code === ADMIN_PASSCODE){
+    if(!code){ showToast(t("adminWrong")); return; }
+    function unlock(){
       setSession("admin", null);
+      try{ localStorage.setItem("leni_admin_key", code); }catch(e){}
       document.body.className = "role-admin";
       adminFilter = "all";
+      adminSeenFirstSync = false;
       showToast(t("adminUnlocked"));
       showView("admin");
       renderDeviceAccordion();
       renderAdmin();
-    } else {
-      showToast(t("adminWrong"));
     }
+    if(isServerConfigured()){
+      showToast(t("syncSyncing"));
+      fetch(SERVER_URL + "?action=verify&key=" + encodeURIComponent(code))
+        .then(function(res){ return res.json(); })
+        .then(function(j){ if(j && j.ok){ unlock(); } else { showToast(t("adminWrong")); } })
+        .catch(function(){ showToast(t("syncOffline")); });
+    } else if(code === ADMIN_PASSCODE){ unlock(); }
+    else { showToast(t("adminWrong")); }
   });
   document.getElementById("adminPassInput").addEventListener("keydown", function(e){
     if(e.key === "Enter"){ document.getElementById("adminPassSubmit").click(); }
@@ -3672,7 +3799,7 @@
   })();
   applyTranslations();
   resetReportFlow();
-  if(isServerConfigured()){ setSyncStatus("syncing"); } else { setSyncStatus("offline"); }
+  if(isServerConfigured()){ setSyncStatus("syncing"); flushQueue(); } else { setSyncStatus("offline"); }
 })();
 </script>
 </body>
